@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use dialoguer::Confirm;
 use dialoguer::{theme::ColorfulTheme, Input, Select};
-use serde::{Deserialize, Serialize}; // Add serde and serde_json to Cargo.toml
+use dirs_next::config_dir;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -136,6 +136,41 @@ async fn execute_custom_command(file_path: Option<String>) -> Result<()> {
         .await
         .context("Failed to extract .tar.gz file")?;
 
+    // mv .srctree to XDG_CONFIG_HOME/kcli/kernel_version/.srctree
+
+    if let Some(mut config_path) = config_dir() {
+        config_path.push("kcli");
+        fs::create_dir_all(&config_path)?; // Ensure the directory exists
+
+        // create dir for kernel version extracted from file_path
+        let kernel_version = file_path
+            .split('/')
+            .last()
+            .unwrap()
+            .split(".tar.gz")
+            .next()
+            .unwrap();
+        config_path.push(kernel_version);
+        fs::create_dir_all(&config_path)?; // Ensure the directory exists
+
+        // move .srctree to XDG_CONFIG_HOME/kcli/$kernel_version/.srctree
+        // mv /.srctree XDG_CONFIG_HOME/kcli/$kernel_version/.srctree
+        let mv_srctree_command = format!("mv /.srctree {}/.srctree", config_path.to_str().unwrap());
+        let mv_srctree_output = Command::new("sh")
+            .arg("-c")
+            .arg(&mv_srctree_command)
+            .output()
+            .await
+            .context("Failed to move .srctree file")?;
+
+        if mv_srctree_output.status.success() {
+            println!(".srctree file moved successfully.");
+        } else {
+            eprintln!("Failed to move .srctree file.");
+            return Err(anyhow::anyhow!("Failed to move .srctree file"));
+        }
+    }
+
     if tar_extract_output.status.success() {
         println!("Archive extracted successfully to /.");
     } else {
@@ -146,7 +181,7 @@ async fn execute_custom_command(file_path: Option<String>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct KernelConfig {
     architecture: String,
     cpusched_selection: String,
@@ -157,6 +192,20 @@ struct KernelConfig {
     lru: String,
     tick_type: String,
     preempt_type: String,
+}
+
+impl KernelConfig {
+    fn save_to_file(&self) -> std::io::Result<()> {
+        if let Some(mut config_path) = config_dir() {
+            config_path.push("kcli");
+            fs::create_dir_all(&config_path)?; // Ensure the directory exists
+
+            config_path.push("kernel_config.json");
+            let serialized = serde_json::to_string_pretty(self)?;
+            fs::write(config_path, serialized)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for KernelConfig {
@@ -175,16 +224,30 @@ impl Default for KernelConfig {
     }
 }
 
+impl KernelConfig {
+    fn load_or_default() -> Self {
+        if let Some(mut path) = config_dir() {
+            path.push("kcli/options/kernel_config.json");
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(config) = serde_json::from_str(&contents) {
+                    return config;
+                }
+            }
+        }
+        Self::default()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = CliArgs::parse();
+    let mut config = KernelConfig::load_or_default(); // Load the existing config or use default
 
     if args.install {
         execute_custom_command(args.file_path).await?;
         return Ok(());
     }
     let theme = ColorfulTheme::default();
-    let mut config = KernelConfig::default();
 
     print_ascii_art().await;
     let cpu_architecture = autodetect_cpu_architecture().await?;
@@ -287,18 +350,16 @@ async fn fetch_latest_kernel_link() -> Result<String> {
 async fn print_ascii_art() {
     println!(
         r#"
-                                 .;o,
-        __."iIoi,._              ;pI __-"-xx.,_
-      `.3"P3PPPoie-,.            .d' `;.     `p;
-     `O"dP"````""`PdEe._       .;'   .     `  `|   NACK
-    "$#"'            ``"P4rdddsP'  .F.    ` `` ;  /
-   i/"""     *"Sp.               .dPff.  _.,;Gw'
-   ;l"'     "  `dp..            "sWf;fe|'
-  `l;          .rPi .    . "" "dW;;doe;
-   $          .;PE`'       " "sW;.d.d;
-   $$        .$"`     `"saed;lW;.d.d.i
-   .$M       ;              ``  ' ld;.p.
-__ _`$o,.-__  "ei-Mu~,.__ ___ `_-dee3'o-ii~m. ____"#
+   /''''''''''''/
+  /''''''''''''/
+ /''''''/
+/''''''/
+\......\
+ \......\
+  \.............../
+   \............./
+
+   capyCachy kernel manager"#
     );
     println!();
 }
@@ -338,7 +399,7 @@ async fn configure_kernel_options(
             "Tick Type",
             "Preempt Type",
             "System Optimizations",
-            "Back to Main Menu",
+            "<-",
         ];
 
         let selection = Select::with_theme(theme)
@@ -356,7 +417,11 @@ async fn configure_kernel_options(
             "Tick Type" => configure_tick_type(config, theme)?,
             "Preempt Type" => configure_preempt_type(config, theme)?,
             "System Optimizations" => configure_system_optimizations(config, theme)?,
-            "Back to Main Menu" => break,
+            "<-" => {
+                println!("Saving and returning to main menu...");
+                config.save_to_file()?; // Saves the config
+                break; // Exits the loop
+            }
             _ => {}
         }
     }
@@ -369,10 +434,10 @@ async fn main_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<(
         let selections = vec![
             "Download Kernel Source",
             "Configure Kernel Options",
+            "Patch Kernel", // New option for patching kernel
             "Build Kernel",
-            "Patch Kernel",     // New option for patching kernel
-            "Install Kernel",   // New option for installing kernel
-            "Uninstall Kernel", // New option for uninstalling kernel
+            "Package Kernel", // New option for installing kernel
+            //"Uninstall Kernel", // New option for uninstalling kernel
             "Advanced Search/Configure",
             "Exit",
         ];
@@ -390,15 +455,171 @@ async fn main_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<(
             "Configure Kernel Options" => {
                 configure_kernel_options(config, theme, &packages_dir).await?
             }
-            "Build Kernel" => build_kernel_menu(config, theme).await?,
-            "Patch Kernel" => pkg_manager::apply_patches_and_handle_conflicts(theme).await?,
-            "Install Kernel" => pkg_manager::menu_install_kernel(theme).await?, // Implementation needed
-            "Uninstall Kernel" => pkg_manager::menu_uninstall_kernel(theme).await?, // Implementation needed
+            "Build Kernel" => build_kernel_menu(config, theme, &packages_dir).await?,
+            "Patch Kernel" => patch_kernel_process(theme, &packages_dir).await?,
+            "Package Kernel" => pkg_manager::menu_install_kernel(theme).await?, // Implementation needed
+            //"Uninstall Kernel" => pkg_manager::menu_uninstall_kernel(theme).await?, // Implementation needed
             "Advanced Search/Configure" => search_and_configure_option(theme).await?,
             "Exit" => break,
             _ => {}
         }
     }
+
+    Ok(())
+}
+
+async fn patch_kernel_process(theme: &ColorfulTheme, packages_dir: &Path) -> Result<()> {
+    let packages = pkg_manager::list_kernel_packages(packages_dir)
+        .await
+        .context("Failed to list kernel packages")?;
+
+    // If no packages are found, return an error or a message
+    if packages.is_empty() {
+        return Err(anyhow::anyhow!("No kernel packages found."));
+    }
+
+    // add <- Go Back to Main Menu option
+    let mut packages = packages;
+    packages.push("<- Back to Main Menu".to_string());
+
+    // Prompt the user to select a Linux version
+    let selected_package_index = Select::with_theme(theme)
+        .with_prompt("Select a Linux version to configure")
+        .items(&packages)
+        .default(0)
+        .interact()?;
+
+    // if <- Back to Main Menu is selected, return to main menu
+    if selected_package_index == packages.len() - 1 {
+        return Ok(());
+    }
+
+    // Get the selected package name
+    let selected_package = &packages[selected_package_index];
+    println!("Selected package for configuration: {}", selected_package);
+
+    // now we should enter the kernel directory
+    let kernel_dir = Path::new(packages_dir).join(selected_package);
+
+    let patches_dir = clone_patches_repo().await?;
+    let selected_patch = navigate_and_select_patch(patches_dir).await?;
+
+    if let Some(patch) = selected_patch {
+        apply_patch(patch, &kernel_dir).await?;
+    }
+
+    Ok(())
+}
+
+async fn clone_patches_repo() -> Result<PathBuf, anyhow::Error> {
+    let repo_url = "https://github.com/CachyOS/kernel-patches";
+    let target_dir = PathBuf::from("kernel-patches"); // Directory where the repo will be cloned
+
+    // Check if the directory already exists
+    if !target_dir.exists() {
+        tokio::process::Command::new("git")
+            .args(["clone", repo_url, target_dir.to_str().unwrap()])
+            .output()
+            .await
+            .context("Failed to clone kernel patches repository")?;
+    }
+
+    Ok(target_dir)
+}
+
+async fn navigate_and_select_patch(patch_dir: PathBuf) -> Result<Option<PathBuf>> {
+    let mut current_dir = patch_dir;
+    let mut history = Vec::new(); // Stack to track the path history
+
+    loop {
+        // Spawn a blocking task to read and process the directory
+        let current_dir_clone = current_dir.clone(); // Clone for moving into the closure
+        let mut entries_vec = tokio::task::spawn_blocking(move || {
+            let mut entries = Vec::new();
+            if let Ok(entries_iter) = fs::read_dir(&current_dir_clone) {
+                for entry in entries_iter.flatten() {
+                    let path = entry.path();
+                    // Filter out the .git directory
+                    if path.file_name().and_then(std::ffi::OsStr::to_str) == Some(".git") {
+                        continue; // Skip the .git directory
+                    }
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        entries.push((name.to_owned(), path));
+                    }
+                }
+            }
+            entries
+        })
+        .await
+        .context("Failed to read directory entries")?; // Await the result of the blocking operation
+
+        // Sort entries: directories first, then files
+        entries_vec.sort_by_key(|(_, path)| (!path.is_dir(), path.clone()));
+
+        // Get names for display in the menu
+        let mut options = entries_vec
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+
+        // Add options for navigation control
+        if !history.is_empty() {
+            options.insert(0, "<- Go Back".to_string()); // Option to go back in history
+        } else {
+            options.insert(0, "<- Back to Main Menu".to_string()); // Option to return to main menu from top directory
+        }
+
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select a folder or patch file")
+            .items(&options)
+            .default(0)
+            .interact()?;
+
+        // Handling the "Go back" option
+        if selection == 0 {
+            if !history.is_empty() {
+                current_dir = history.pop().unwrap(); // Navigate back in the directory stack
+                continue;
+            } else {
+                return Ok(None); // No selection made, return to main menu
+            }
+        }
+
+        // Properly adjust the index for selecting entries
+        let selected_path = &entries_vec[selection - 1].1; // Adjust index by one to account for the go back option
+
+        // Check if it's a directory or a .patch file
+        if selected_path.is_dir() {
+            history.push(current_dir.clone()); // Push current directory to history
+            current_dir = selected_path.clone();
+        } else if selected_path.extension().and_then(std::ffi::OsStr::to_str) == Some("patch") {
+            return Ok(Some(selected_path.clone()));
+        }
+    }
+}
+
+async fn apply_patch(patch_file: PathBuf, kernel_dir: &Path) -> Result<(), anyhow::Error> {
+    let patch_file_str = patch_file.to_string_lossy().to_string();
+
+    // Command to apply the patch
+    let output = Command::new("sh")
+        .current_dir(kernel_dir) // Sets the working directory to kernel_dir
+        .arg("-c")
+        .arg(format!("patch -Np1 --merge < ../../{}", patch_file_str))
+        .output()
+        .await
+        .context("Failed to apply patch")?;
+
+    // Check if the command was successful
+    if !output.status.success() {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to apply patch: {}", error_message);
+    }
+
+    println!(
+        "Patch applied successfully: {}",
+        patch_file.to_string_lossy()
+    );
 
     Ok(())
 }
@@ -432,9 +653,51 @@ async fn modify_kernel_config(kernel_dir: &str, config_commands: Vec<String>) ->
     Ok(())
 }
 
-async fn build_kernel_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<()> {
+async fn build_kernel_menu(
+    config: &mut KernelConfig,
+    theme: &ColorfulTheme,
+    packages_dir: &Path,
+) -> Result<()> {
+    // First, list available Linux versions
+    let packages = pkg_manager::list_kernel_packages(packages_dir)
+        .await
+        .context("Failed to list kernel packages")?;
+
+    // If no packages are found, return an error or a message
+    if packages.is_empty() {
+        return Err(anyhow::anyhow!("No kernel packages found."));
+    }
+
+    // add <- Go Back to Main Menu option
+    let mut packages = packages;
+    packages.push("<- Back to Main Menu".to_string());
+
+    // Prompt the user to select a Linux version
+    let selected_package_index = Select::with_theme(theme)
+        .with_prompt("Select a Linux version to configure")
+        .items(&packages)
+        .default(0)
+        .interact()?;
+
+    // if <- Back to Main Menu is selected, return to main menu
+    if selected_package_index == packages.len() - 1 {
+        return Ok(());
+    }
+
+    // Get the selected package name
+    let selected_package = &packages[selected_package_index];
+    println!("Selected package for configuration: {}", selected_package);
+
+    // now we should enter the kernel directory
+    let kernel_dir = Path::new(packages_dir).join(selected_package);
+
     loop {
-        let selections = vec!["Compile", "Install Modules", "Install Headers", "Go Back"];
+        let selections = vec![
+            "Compile",
+            "Install Modules",
+            "Install Headers",
+            "<- Back to Main Menu",
+        ];
 
         let selection = Select::with_theme(theme)
             .with_prompt("Build Kernel")
@@ -444,38 +707,67 @@ async fn build_kernel_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> 
 
         match selections.get(selection) {
             Some(&"Compile") => {
-                run_make_command("LOCALVERSION=\"\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\"")
-                    .await?;
+                run_make_command(
+                    "LOCALVERSION=\"\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\"",
+                    &kernel_dir,
+                )
+                .await?;
             }
             Some(&"Install Modules") => {
-                run_make_command("modules_install").await?;
+                run_make_command("modules_install", &kernel_dir).await?;
             }
             Some(&"Install Headers") => {
-                run_make_command("headers_install").await?;
+                run_make_command("headers_install", &kernel_dir).await?;
             }
-            Some(&"Go Back") => return Ok(()),
+            Some(&"<- Back to Main Menu") => return Ok(()),
             _ => return Err(anyhow::anyhow!("Invalid selection")),
         }
     }
 }
 
-async fn run_make_command(args: &str) -> Result<()> {
-    // Split the args into a Vec by whitespace, respecting quoted substrings
+async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
+    let command = format!("make {}", args);
     use shell_words::split; // Add shell_words to your Cargo.toml
 
-    let command = format!("make {}", args);
+    let config_path = kernel_dir.join(".config");
+
+    // Check if the .config file exists
+    if !config_path.exists() {
+        println!("`.config` file not found, downloading from repository...");
+        // URL to download the .config file
+        let config_url =
+            "https://raw.githubusercontent.com/CachyOS/linux-cachyos/master/linux-cachyos/config";
+        let response = reqwest::get(config_url)
+            .await
+            .context("Failed to download the .config file")?;
+        let contents = response
+            .text()
+            .await
+            .context("Failed to read the .config file content")?;
+
+        // Write the contents to the .config file
+        tokio::fs::write(&config_path, contents)
+            .await
+            .context("Failed to write the .config file")?;
+        println!(
+            "`.config` file downloaded and saved to {}",
+            config_path.display()
+        );
+    } else {
+        println!("Using existing `.config` file at {}", config_path.display());
+    }
+
     let args_vec = split(&command).context("Failed to parse command arguments")?;
 
-    // Use the first element as the command and the rest as args
     let (make, args) = args_vec
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("No command found"))?;
 
     let status = Command::new(make)
         .args(args)
-        .current_dir("./linux") // Set the working directory to the linux subfolder
+        .current_dir(kernel_dir) // Use the provided kernel directory
         .status()
-        .await // Wait for the future to complete
+        .await
         .context("Failed to execute make command")?;
 
     if status.success() {
@@ -489,7 +781,7 @@ async fn run_make_command(args: &str) -> Result<()> {
 }
 
 async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<()> {
-    let selections = vec!["Stable Kernel", "RC Kernel", "Go Back to Main Menu"];
+    let selections = vec!["Stable Kernel", "RC Kernel", "<-"];
     let selection = Select::with_theme(theme)
         .with_prompt("Select Kernel Version to Download")
         .items(&selections)
@@ -502,7 +794,7 @@ async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTh
             "linux-stable",
         ),
         "RC Kernel" => ("https://github.com/torvalds/linux.git", "linux-rc"),
-        "Go Back to Main Menu" => return Ok(()),
+        "<-" => return Ok(()),
         _ => return Err(anyhow::anyhow!("Invalid selection")),
     };
 
@@ -637,6 +929,7 @@ fn configure_system_optimizations(config: &mut KernelConfig, theme: &ColorfulThe
     println!("Configuring System Optimizations (Placeholder)");
     Ok(())
 }
+
 async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str) -> Result<()> {
     // Set architecture (example setting, adjust as necessary)
     let arch_config_cmd = format!("CONFIG_{}", config.architecture);

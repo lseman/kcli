@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use colored::*;
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use futures::TryStreamExt;
 use regex::Regex;
@@ -9,13 +10,11 @@ use tokio::fs::{self, File};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::process::Command as AsyncCommand;
-use walkdir::WalkDir; // Add `walkdir` to your Cargo.toml
-                      //use std::io::{self, BufRead, BufReader, Write};
-use colored::*; // Add this import
+use walkdir::WalkDir; // Add this import
 
 pub async fn menu_install_kernel(theme: &ColorfulTheme) -> Result<()> {
     let main_dir = Path::new("./");
-    let packages_dir = Path::new("./kernels/");
+    let packages_dir = Path::new("./ksrc/");
     let packages = list_kernel_packages(packages_dir).await?;
 
     let selection = Select::with_theme(theme)
@@ -138,20 +137,42 @@ pub async fn menu_uninstall_kernel(theme: &ColorfulTheme) -> Result<()> {
 }
 
 async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> Result<()> {
-    // Calculate the relative path for the install target
-    let relative_install_target = PathBuf::from("../../")
-        .join(install_target.strip_prefix("./")?)
-        .clone();
-    println!("Using install path: {}", relative_install_target.display());
+    let config_path = kernel_src_dir.join(".config");
+
+    // Check if the .config file exists
+    if !config_path.exists() {
+        println!("`.config` file not found, downloading from repository...");
+        // URL to download the .config file
+        let config_url =
+            "https://raw.githubusercontent.com/CachyOS/linux-cachyos/master/linux-cachyos/config";
+        let response = reqwest::get(config_url)
+            .await
+            .context("Failed to download the .config file")?;
+        let contents = response
+            .text()
+            .await
+            .context("Failed to read the .config file content")?;
+
+        // Write the contents to the .config file
+        tokio::fs::write(&config_path, contents)
+            .await
+            .context("Failed to write the .config file")?;
+        println!(
+            "`.config` file downloaded and saved to {}",
+            config_path.display()
+        );
+    } else {
+        println!("Using existing `.config` file at {}", config_path.display());
+    }
+
+    // Calculate the relative path for the install target for modules
+    let install_mod_path = install_target.join("modules");
 
     // Running modules_install with INSTALL_MOD_PATH
     println!("Executing `make modules_install`...");
     let status_modules_install = Command::new("make")
         .arg("modules_install")
-        .arg(format!(
-            "INSTALL_MOD_PATH={}",
-            relative_install_target.display()
-        ))
+        .arg(format!("INSTALL_MOD_PATH={}", install_mod_path.display()))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // To see the make command output
         .stderr(Stdio::inherit()) // To see the make command errors
@@ -163,14 +184,14 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
         return Err(anyhow::anyhow!("`make modules_install` failed"));
     }
 
-    // Running headers_install with INSTALL_HDR_PATH directly in the command
+    // Construct headers install path (mod_path/build)
+    let install_hdr_path = install_mod_path.join("build");
+
+    // Running headers_install with INSTALL_HDR_PATH
     println!("Executing `make headers_install` with INSTALL_HDR_PATH...");
     let status_headers_install = Command::new("make")
         .arg("headers_install")
-        .arg(format!(
-            "INSTALL_HDR_PATH={}",
-            relative_install_target.display()
-        ))
+        .arg(format!("INSTALL_HDR_PATH={}", install_hdr_path.display()))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // Inherit stdout to see command output
         .stderr(Stdio::inherit()) // Inherit stderr to see any errors
