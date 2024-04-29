@@ -87,6 +87,12 @@ struct CliArgs {
     install: bool, // This flag will be true if -install is used
     #[clap(long, requires("install"))] // Only accept this if --install is also used
     file_path: Option<String>, // Optional path to the .tar.gz file
+    #[clap(long)]
+    uninstall: bool, // This flag will be true if --uninstall is used
+    #[clap(long, requires("uninstall"))] // Only accept this if --install is also used
+    kernel_version: Option<String>, // Optional kernel version to uninstall
+    #[clap(long)]
+    list: bool, // This flag will be true if --list is used
 }
 
 use std::process;
@@ -181,6 +187,75 @@ async fn execute_custom_command(file_path: Option<String>) -> Result<()> {
     Ok(())
 }
 
+async fn execute_list_command() -> Result<()> {
+    // list the installed kernels, by listing config_path
+    let config_path: PathBuf = config_dir().unwrap().join("kcli");
+    let kernel_versions = fs::read_dir(&config_path)
+        .context("Failed to read kernel versions directory")?
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .and_then(|e| e.file_name().into_string().ok())
+                .filter(|name| name != "kernel_config.json")
+        })
+        .collect::<Vec<String>>();
+
+    // remove "options" from the list
+    let kernel_versions = kernel_versions
+        .iter()
+        .filter(|&x| x != "options")
+        .collect::<Vec<&String>>();
+
+    if kernel_versions.is_empty() {
+        println!("No installed kernels found.");
+    } else {
+        println!("Installed kernels:");
+        for kernel in kernel_versions.iter() {
+            println!("- {}", kernel);
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_uninstall_command(kernel_name: Option<String>) -> Result<()> {
+    // list the installed kernels, by listing config_path
+    println!("Uninstalling kernel {}", kernel_name.unwrap());
+
+    // get .srctree from config
+    let config_path: PathBuf = config_dir().unwrap().join("kcli");
+    let kernel_version_path = config_path.join(kernel_name.unwrap());
+    
+    // inside the directory shall reside a .srctree file, check if exists
+    let srctree_path = kernel_version_path.join(".srctree");
+    if !srctree_path.exists() {
+        eprintln!("No .srctree file found in the kernel version directory.");
+        return Err(anyhow::anyhow!("No .srctree file found"));
+    }
+
+    // if it exists, we will rm -rf each of the files in the .srctree file
+    let srctree_file = fs::read_to_string(&srctree_path).context("Failed to read .srctree file")?;
+    let srctree_file = srctree_file.trim(); // Remove any leading/trailing whitespace
+
+    // remove each file in the .srctree file
+    let rm_rf_command = format!("rm -rf {}", srctree_file);
+    let rm_rf_output = Command::new("sh")
+        .arg("-c")
+        .arg(&rm_rf_command)
+        .output()
+        .await
+        .context("Failed to remove kernel files")?;
+
+    if rm_rf_output.status.success() {
+        println!("Kernel files removed successfully.");
+    } else {
+        eprintln!("Failed to remove kernel files.");
+        return Err(anyhow::anyhow!("Failed to remove kernel files"));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct KernelConfig {
     architecture: String,
@@ -243,8 +318,18 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
     let mut config = KernelConfig::load_or_default(); // Load the existing config or use default
 
+    if args.list {
+        execute_list_command().await?;
+        return Ok(());
+    }
+
     if args.install {
         execute_custom_command(args.file_path).await?;
+        return Ok(());
+    }
+
+    if args.uninstall {
+        execute_uninstall_command(args.kernel_version).await?;
         return Ok(());
     }
     let theme = ColorfulTheme::default();
