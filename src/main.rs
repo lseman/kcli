@@ -225,7 +225,7 @@ async fn execute_uninstall_command(kernel_name: Option<String>) -> Result<()> {
     // get .srctree from config
     let config_path: PathBuf = config_dir().unwrap().join("kcli");
     let kernel_version_path = config_path.join(kernel_name.clone().unwrap());
-    
+
     // inside the directory shall reside a .srctree file, check if exists
     let srctree_path = kernel_version_path.join(".srctree");
     if !srctree_path.exists() {

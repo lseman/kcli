@@ -11,6 +11,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::process::Command as AsyncCommand;
 use walkdir::WalkDir; // Add this import
+use std::io::Write;
 
 pub async fn menu_install_kernel(theme: &ColorfulTheme) -> Result<()> {
     let main_dir = Path::new("./");
@@ -56,6 +57,37 @@ pub async fn list_kernel_packages(packages_dir: &Path) -> Result<Vec<String>> {
     Ok(packages)
 }
 
+async fn create_pkginfo_file(kernel_name: &str, install_target: &Path) -> Result<()> {
+    let pkginfo_content = format!("pkgname = capycachy\npkgver = {}\npkgdesc = Custom kernel\n", kernel_name);
+    let pkginfo_path = install_target.join(".PKGINFO");
+    let mut file = File::create(&pkginfo_path).await?;
+    file.write_all(pkginfo_content.as_bytes()).await?;
+    Ok(())
+}
+
+async fn create_buildinfo_file(install_target: &Path) -> Result<()> {
+    let buildinfo_content = "buildenv = (distcc color ccache check !sign)\noptions = (!strip docs libtool staticlibs emptydirs zipman purge !upx !debug)\n";
+    let buildinfo_path = install_target.join(".BUILDINFO");
+    let mut file = File::create(&buildinfo_path).await?;
+    file.write_all(buildinfo_content.as_bytes()).await?;
+    Ok(())
+}
+
+async fn create_mtree_file(pkg_dir: &Path, kernel_name: &str) -> Result<()> {
+    let mtree_path = pkg_dir.join(format!("{}/.MTREE", kernel_name));
+    let output = Command::new("bsdtar")
+        .args(&["-czf", mtree_path.to_str().unwrap(), "-C", pkg_dir.to_str().unwrap(), kernel_name])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        Err(anyhow::anyhow!("Failed to create .MTREE file"))
+    } else {
+        Ok(())
+    }
+}
+
+
 pub async fn installing_kernel(
     kernel_src_dir: &Path,
     base_pkg_dir: &Path,
@@ -91,8 +123,17 @@ pub async fn installing_kernel(
     }
 
     let pkg_dir = Path::new("./pkg/");
+
+    create_pkginfo_file(kernel_name, &install_target).await?;
+    create_buildinfo_file(&install_target).await?;
+    create_mtree_file(&pkg_dir, kernel_name).await?;
+
+    // cp cp kernel_src_dir/arch/x86/boot/bzImage install_target/boot/vmlinuz-capycachy-${kernel_name}
+    let bzimage_path = kernel_src_dir.join("arch/x86/boot/bzImage");
+    let vmlinuz_path = install_target.join("boot").join(format!("vmlinuz-capycachy-{}", kernel_name));
+
     // Compress the installed kernel directory including .srctree
-    compress_kernel_package(&pkg_dir, kernel_name).await?;
+    //compress_kernel_package(&pkg_dir, kernel_name).await?;
 
     println!(
         "Kernel package '{}' installed and compressed successfully.",
@@ -139,6 +180,8 @@ pub async fn menu_uninstall_kernel(theme: &ColorfulTheme) -> Result<()> {
 async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> Result<()> {
     let config_path = kernel_src_dir.join(".config");
 
+
+
     // Check if the .config file exists
     if !config_path.exists() {
         println!("`.config` file not found, downloading from repository...");
@@ -166,13 +209,13 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
     }
 
     // Calculate the relative path for the install target for modules
-    let install_mod_path = install_target.join("modules");
+    let install_mod_path = install_target.clone();
 
     // Running modules_install with INSTALL_MOD_PATH
     println!("Executing `make modules_install`...");
     let status_modules_install = Command::new("make")
         .arg("modules_install")
-        .arg(format!("INSTALL_MOD_PATH={}", install_mod_path.display()))
+        .arg(format!("INSTALL_MOD_PATH=../../{}", install_mod_path.display()))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // To see the make command output
         .stderr(Stdio::inherit()) // To see the make command errors
@@ -184,14 +227,29 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
         return Err(anyhow::anyhow!("`make modules_install` failed"));
     }
 
+    // get kernel name from kernel_src_dir
+    //let kernel_name = kernel_src_dir.file_name().unwrap().to_str().unwrap();
+    // get only the last part of the kernel name
+    //let kernel_name = kernel_name.split("/").last().unwrap();
+
+    //println!("Kernel name: {}", kernel_name);
+
+    // delete build directory
+    //let build_dir = "../../name/lib/modules/*/build".replace("name", install_mod_path.to_str().unwrap());
+    //println!("Removing build directory: {}", build_dir);
+    //fs::remove_dir_all(&build_dir).await.context("Removing build directory failed")?;
+
     // Construct headers install path (mod_path/build)
-    let install_hdr_path = install_mod_path.join("build");
+    let install_hdr_path = install_mod_path.join("usr");
+
+    println!("Installing modules to: {}", install_mod_path.display());
+    println!("Installing headers to: {}", install_hdr_path.display());
 
     // Running headers_install with INSTALL_HDR_PATH
     println!("Executing `make headers_install` with INSTALL_HDR_PATH...");
     let status_headers_install = Command::new("make")
         .arg("headers_install")
-        .arg(format!("INSTALL_HDR_PATH={}", install_hdr_path.display()))
+        .arg(format!("INSTALL_HDR_PATH=../../{}", install_hdr_path.display()))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // Inherit stdout to see command output
         .stderr(Stdio::inherit()) // Inherit stderr to see any errors
