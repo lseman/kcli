@@ -220,11 +220,11 @@ async fn execute_list_command() -> Result<()> {
 
 async fn execute_uninstall_command(kernel_name: Option<String>) -> Result<()> {
     // list the installed kernels, by listing config_path
-    println!("Uninstalling kernel {}", kernel_name.unwrap());
+    println!("Uninstalling kernel {}", kernel_name.clone().unwrap());
 
     // get .srctree from config
     let config_path: PathBuf = config_dir().unwrap().join("kcli");
-    let kernel_version_path = config_path.join(kernel_name.unwrap());
+    let kernel_version_path = config_path.join(kernel_name.clone().unwrap());
     
     // inside the directory shall reside a .srctree file, check if exists
     let srctree_path = kernel_version_path.join(".srctree");
