@@ -454,25 +454,6 @@ async fn configure_kernel_options(
     packages_dir: &Path,
 ) -> Result<()> {
     // First, list available Linux versions
-    let packages = pkg_manager::list_kernel_packages(packages_dir)
-        .await
-        .context("Failed to list kernel packages")?;
-
-    // If no packages are found, return an error or a message
-    if packages.is_empty() {
-        return Err(anyhow::anyhow!("No kernel packages found."));
-    }
-
-    // Prompt the user to select a Linux version
-    let selected_package_index = Select::with_theme(theme)
-        .with_prompt("Select a Linux version to configure")
-        .items(&packages)
-        .default(0)
-        .interact()?;
-
-    // Get the selected package name
-    let selected_package = &packages[selected_package_index];
-    println!("Selected package for configuration: {}", selected_package);
 
     loop {
         let selections = vec![
@@ -519,6 +500,7 @@ async fn main_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<(
         let selections = vec![
             "Download Kernel Source",
             "Configure Kernel Options",
+            "Apply Kernel Configuration",
             "Patch Kernel", // New option for patching kernel
             "Build Kernel",
             "Package Kernel", // New option for installing kernel
@@ -539,6 +521,9 @@ async fn main_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<(
             "Download Kernel Source" => configure_download_kernel(config, theme).await?,
             "Configure Kernel Options" => {
                 configure_kernel_options(config, theme, &packages_dir).await?
+            }
+            "Apply Kernel Configuration" => {
+                apply_kernel_configuration(config, theme, &packages_dir).await?
             }
             "Build Kernel" => build_kernel_menu(config, theme, &packages_dir).await?,
             "Patch Kernel" => patch_kernel_process(theme, &packages_dir).await?,
@@ -1015,14 +1000,51 @@ fn configure_system_optimizations(config: &mut KernelConfig, theme: &ColorfulThe
     Ok(())
 }
 
-async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str) -> Result<()> {
-    // Set architecture (example setting, adjust as necessary)
+async fn apply_kernel_configuration(
+    config: &KernelConfig,
+    theme: &ColorfulTheme,
+    packages_dir: &Path,
+) -> Result<()> {
+    // First, list available Linux versions
+    let packages = pkg_manager::list_kernel_packages(packages_dir)
+        .await
+        .context("Failed to list kernel packages")?;
+
+    // If no packages are found, return an error or a message
+    if packages.is_empty() {
+        return Err(anyhow::anyhow!("No kernel packages found."));
+    }
+
+    // add <- Go Back to Main Menu option
+    let mut packages = packages;
+    packages.push("<- Back to Main Menu".to_string());
+
+    // Prompt the user to select a Linux version
+    let selected_package_index = Select::with_theme(theme)
+        .with_prompt("Select a Linux version to configure")
+        .items(&packages)
+        .default(0)
+        .interact()?;
+
+    // if <- Back to Main Menu is selected, return to main menu
+    if selected_package_index == packages.len() - 1 {
+        return Ok(());
+    }
+
+    // Get the selected package name
+    let selected_package = &packages[selected_package_index];
+    println!("Selected package for configuration: {}", selected_package);
+
+    // now we should enter the kernel directory
+    let kernel_src_dir = Path::new(packages_dir).join(selected_package);
+
     let arch_config_cmd = format!("CONFIG_{}", config.architecture);
     tokio::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
             "{}/scripts/config --disable CONFIG_GENERIC_CPU --enable {}",
-            kernel_src_dir, arch_config_cmd
+            kernel_src_dir.display(),
+            arch_config_cmd
         ))
         .output()
         .await
@@ -1033,10 +1055,7 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
         "None" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!(
-                    "{}/scripts/config -d SCHED_BORE -d SCHED_CLASS_EXT -d SCHED_PDS",
-                    kernel_src_dir
-                ))
+                .arg("scripts/config -d SCHED_BORE -d SCHED_CLASS_EXT -d SCHED_PDS")
                 .output()
                 .await
                 .context("Failed to disable CPU scheduler config")?;
@@ -1048,27 +1067,30 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
     match config.hugepages.as_str() {
         "Always" => {
             tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("{}/scripts/config -e HUGETLBFS -e HUGETLB_PAGE -e HUGETLB -e HUGETLB_PAGE_SIZE_VARIABLE", kernel_src_dir))
-                .output()
-                .await
-                .context("Failed to enable hugepages")?;
+            .arg("-c")
+            .arg("scripts/config -e HUGETLBFS -e HUGETLB_PAGE -e HUGETLB -e HUGETLB_PAGE_SIZE_VARIABLE")
+            .current_dir(kernel_src_dir.clone())  // Set the current directory here
+            .output()
+            .await
+            .context("Failed to enable hugepages")?;
         }
         "Madvise" => {
             tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("{}/scripts/config -e HUGETLBFS -e HUGETLB_PAGE -e HUGETLB -d HUGETLB_PAGE_SIZE_VARIABLE", kernel_src_dir))
-                .output()
-                .await
-                .context("Failed to enable hugepages")?;
+            .arg("-c")
+            .arg("scripts/config -e HUGETLBFS -e HUGETLB_PAGE -e HUGETLB -d HUGETLB_PAGE_SIZE_VARIABLE")
+            .current_dir(kernel_src_dir.clone())  // Set the current directory here
+            .output()
+            .await
+            .context("Failed to enable hugepages")?;
         }
         "No" => {
             tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("{}/scripts/config -d HUGETLBFS -d HUGETLB_PAGE -d HUGETLB -d HUGETLB_PAGE_SIZE_VARIABLE", kernel_src_dir))
-                .output()
-                .await
-                .context("Failed to disable hugepages")?;
+            .arg("-c")
+            .arg("scripts/config -d HUGETLBFS -d HUGETLB_PAGE -d HUGETLB -d HUGETLB_PAGE_SIZE_VARIABLE")
+            .current_dir(kernel_src_dir.clone())  // Set the current directory here
+            .output()
+            .await
+            .context("Failed to disable hugepages")?;
         }
         _ => {}
     }
@@ -1078,10 +1100,8 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
         "Standard" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!(
-                    "{}/scripts/config -e LRU_LIST -d LRU_STATS -d LRU",
-                    kernel_src_dir
-                ))
+                .arg("scripts/config -e LRU_LIST -d LRU_STATS -d LRU")
+                .current_dir(kernel_src_dir.clone()) // Set the current directory here
                 .output()
                 .await
                 .context("Failed to configure standard LRU")?;
@@ -1089,10 +1109,8 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
         "Stats" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!(
-                    "{}/scripts/config -d LRU_LIST -e LRU_STATS -d LRU",
-                    kernel_src_dir
-                ))
+                .arg("scripts/config -d LRU_LIST -e LRU_STATS -d LRU")
+                .current_dir(kernel_src_dir.clone()) // Set the current directory here
                 .output()
                 .await
                 .context("Failed to configure LRU with stats")?;
@@ -1100,10 +1118,8 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
         "None" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!(
-                    "{}/scripts/config -d LRU_LIST -d LRU_STATS -e LRU",
-                    kernel_src_dir
-                ))
+                .arg("scripts/config -d LRU_LIST -d LRU_STATS -e LRU")
+                .current_dir(kernel_src_dir.clone()) // Set the current directory here
                 .output()
                 .await
                 .context("Failed to disable LRU")?;
@@ -1115,49 +1131,68 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
     match config.preempt_type.as_str() {
         "full" => {
             tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("{}/scripts/config -e PREEMPT_BUILD -d PREEMPT_NONE -d PREEMPT_VOLUNTARY -e PREEMPT -e PREEMPT_COUNT -e PREEMPTION -e PREEMPT_DYNAMIC", kernel_src_dir))
-                .output()
-                .await
-                .context("Failed to configure full preemption")?;
+            .arg("-c")
+            .arg("scripts/config -e PREEMPT_BUILD -d PREEMPT_NONE -d PREEMPT_VOLUNTARY -e PREEMPT -e PREEMPT_COUNT -e PREEMPTION -e PREEMPT_DYNAMIC")
+            .current_dir(kernel_src_dir.clone()) // Set the current directory here
+            .output()
+            .await
+            .context("Failed to configure full preemption")?;
         }
         "voluntary" => {
             tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("{}/scripts/config -e PREEMPT_BUILD -d PREEMPT_NONE -e PREEMPT_VOLUNTARY -d PREEMPT -e PREEMPT_COUNT -e PREEMPTION -d PREEMPT_DYNAMIC", kernel_src_dir))
-                .output()
-                .await
-                .context("Failed to configure voluntary preemption")?;
+            .arg("-c")
+            .arg("scripts/config -e PREEMPT_BUILD -d PREEMPT_NONE -e PREEMPT_VOLUNTARY -d PREEMPT -e PREEMPT_COUNT -e PREEMPTION -d PREEMPT_DYNAMIC")
+            .current_dir(kernel_src_dir.clone()) // Set the current directory here
+            .output()
+            .await
+            .context("Failed to configure voluntary preemption")?;
         }
         "none" => {
             tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("{}/scripts/config -e PREEMPT_NONE_BUILD -e PREEMPT_NONE -d PREEMPT_VOLUNTARY -d PREEMPT -d PREEMPTION -d PREEMPT_DYNAMIC", kernel_src_dir))
-                .output()
-                .await
-                .context("Failed to disable preemption")?;
+            .arg("-c")
+            .arg("scripts/config -e PREEMPT_NONE_BUILD -e PREEMPT_NONE -d PREEMPT_VOLUNTARY -d PREEMPT -d PREEMPTION -d PREEMPT_DYNAMIC")
+            .current_dir(kernel_src_dir.clone()) // Set the current directory here
+            .output()
+            .await
+            .context("Failed to disable preemption")?;
         }
-
         _ => {}
     }
 
     // Tick Rate Configuration
+
+    println!("Configuring tick rate to {}", config.tick_rate.as_str());
     match config.tick_rate.as_str() {
         "100" | "250" | "500" | "600" | "1000" => {
-            tokio::process::Command::new("sh")
+            let result = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(format!(
-                    "{}/scripts/config -d HZ_300 -e HZ_{} --set-val HZ {}",
-                    kernel_src_dir, config.tick_rate, config.tick_rate
+                    "scripts/config -d HZ_300 -e HZ_{} --set-val HZ {}",
+                    config.tick_rate,
+                    config.tick_rate
                 ))
+                .current_dir(kernel_src_dir.clone()) // Correct placement of .current_dir()
                 .output()
                 .await
                 .context(format!(
                     "Failed to configure tick rate to {}",
                     config.tick_rate
-                ))?;
+                ));
+
+            match result {
+                Ok(output) => {
+                    // Handle successful output
+                    println!("Command executed successfully.");
+                }
+                Err(e) => {
+                    // Handle errors
+                    eprintln!("Failed to execute command: {}", e);
+                }
+            }
         }
-        _ => {}
+        _ => {
+            println!("Tick rate not supported");
+        }
     }
 
     // Tick Type Configuration
@@ -1165,15 +1200,17 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
         "Periodic" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!("{}/scripts/config -e TICK_ONESHOT -d TICK_ONESHOT -d TICK_ONESHOT -d TICK_ONESHOT", kernel_src_dir))
+                .arg("scripts/config -e TICK_PERIODIC -d TICK_ONESHOT -d NO_HZ_IDLE -d NO_HZ_FULL")
+                .current_dir(kernel_src_dir.clone()) // Set the current directory here
                 .output()
                 .await
-                .context("Failed to configure tick type to periodic")?;
+                .context("Failed to configure tick type to Periodic")?;
         }
         "NoHz_Full" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!("{}/scripts/config -d TICK_ONESHOT -e TICK_ONESHOT -d TICK_ONESHOT -d TICK_ONESHOT", kernel_src_dir))
+                .arg("scripts/config -d TICK_PERIODIC -d TICK_ONESHOT -d NO_HZ_IDLE -e NO_HZ_FULL")
+                .current_dir(kernel_src_dir.clone()) // Set the current directory here
                 .output()
                 .await
                 .context("Failed to configure tick type to NoHz_Full")?;
@@ -1181,7 +1218,8 @@ async fn apply_kernel_configuration(config: &KernelConfig, kernel_src_dir: &str)
         "NoHz_Idle" => {
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!("{}/scripts/config -d TICK_ONESHOT -d TICK_ONESHOT -e TICK_ONESHOT -d TICK_ONESHOT", kernel_src_dir))
+                .arg("scripts/config -d TICK_PERIODIC -e TICK_ONESHOT -e NO_HZ_IDLE -d NO_HZ_FULL")
+                .current_dir(kernel_src_dir.clone()) // Set the current directory here
                 .output()
                 .await
                 .context("Failed to configure tick type to NoHz_Idle")?;
