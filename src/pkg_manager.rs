@@ -15,6 +15,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::process::Command as AsyncCommand;
 use walkdir::WalkDir; // Add this import
+use futures::stream::StreamExt; // Add missing import
 
 pub async fn menu_install_kernel(theme: &ColorfulTheme) -> Result<()> {
     let mut config_path = config_dir().unwrap();
@@ -311,43 +312,21 @@ pub async fn menu_uninstall_kernel(theme: &ColorfulTheme) -> Result<()> {
 }
 
 async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> Result<()> {
-    let config_path = kernel_src_dir.join(".config");
-
-    // Check if the .config file exists
-    if !config_path.exists() {
-        println!("`.config` file not found, downloading from repository...");
-        // URL to download the .config file
-        let config_url =
-            "https://raw.githubusercontent.com/CachyOS/linux-cachyos/master/linux-cachyos/config";
-        let response = reqwest::get(config_url)
-            .await
-            .context("Failed to download the .config file")?;
-        let contents = response
-            .text()
-            .await
-            .context("Failed to read the .config file content")?;
-
-        // Write the contents to the .config file
-        tokio::fs::write(&config_path, contents)
-            .await
-            .context("Failed to write the .config file")?;
-        println!(
-            "`.config` file downloaded and saved to {}",
-            config_path.display()
-        );
-    } else {
-        println!("Using existing `.config` file at {}", config_path.display());
-    }
-
     // Calculate the relative path for the install target for modules
     let install_mod_path = install_target.clone();
+
+
+    // get kernel name from kernel_src_dir
+    //let kernel_name = kernel_src_dir.file_name().unwrap().to_str().unwrap();
+    // get only the last part of the kernel name
+    //let kernel_name = kernel_name.split("/").last().unwrap();
 
     // Running modules_install with INSTALL_MOD_PATH
     println!("Executing `make modules_install`...");
     let status_modules_install = Command::new("make")
         .arg("modules_install")
         .arg(format!(
-            "INSTALL_MOD_PATH=../../{}",
+            "INSTALL_MOD_PATH={}",
             install_mod_path.display()
         ))
         .current_dir(kernel_src_dir)
@@ -359,19 +338,29 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
 
     if !status_modules_install.success() {
         return Err(anyhow::anyhow!("`make modules_install` failed"));
+    }    
+
+    // strip last dir from install_mod_path
+    // get the directory list in the path
+    let install_mod_path_installed = install_mod_path.clone();
+    let install_mod_path_installed = install_mod_path_installed.join("lib/modules");
+    println!("Install mod path: {}", install_mod_path_installed.to_str().unwrap());
+    
+    // get the directories inside install_mod_path
+    //let mut path_list = Vec::new();
+    let mut dir_stream = fs::read_dir(install_mod_path_installed).await?;
+
+    let mut last_dir = PathBuf::new();
+    while let Some(entry) = dir_stream.next_entry().await? {
+        last_dir = entry.path();
     }
 
-    // get kernel name from kernel_src_dir
-    //let kernel_name = kernel_src_dir.file_name().unwrap().to_str().unwrap();
-    // get only the last part of the kernel name
-    //let kernel_name = kernel_name.split("/").last().unwrap();
-
-    //println!("Kernel name: {}", kernel_name);
-
+    /*
     // delete build directory
-    //let build_dir = "../../name/lib/modules/*/build".replace("name", install_mod_path.to_str().unwrap());
-    //println!("Removing build directory: {}", build_dir);
-    //fs::remove_dir_all(&build_dir).await.context("Removing build directory failed")?;
+    let build_dir = "{}/build".replace("{}", last_dir.to_str().unwrap());
+    println!("Removing build directory: {}", build_dir);
+    // do it in a try
+    let _ = fs::remove_dir_all(build_dir).await;
 
     // Construct headers install path (mod_path/build)
     let install_hdr_path = install_mod_path.join("usr");
@@ -380,13 +369,13 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
     println!("Installing headers to: {}", install_hdr_path.display());
 
     // Running headers_install with INSTALL_HDR_PATH
-    /*
+    
     println!("Executing `make headers_install` with INSTALL_HDR_PATH...");
     let status_headers_install = Command::new("make")
         .arg("headers_install")
         .arg(format!(
-            "INSTALL_HDR_PATH=../../{}",
-            install_hdr_path.display()
+            "INSTALL_HDR_PATH={}/build",
+            last_dir.display()
         ))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // Inherit stdout to see command output
@@ -399,6 +388,7 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
         return Err(anyhow::anyhow!("`make headers_install` failed"));
     }
      */
+    
 
     Ok(())
 }
