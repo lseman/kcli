@@ -17,7 +17,7 @@ To get started with `capyCachy Kernel Manager`, clone this repository to your lo
 
 ```bash
 git clone https://github.com/lseman/kcli.git
-cd capycachy-kernel-manager
+cd kcli
 ```
 
 Follow the instructions below to compile from source:

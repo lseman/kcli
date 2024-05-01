@@ -79,7 +79,7 @@ enum Error {
 }
 
 #[derive(Parser, Debug)]
-#[clap(name = "Kernel Configuration", version)]
+#[clap(name = "capyCachy kcli", version)]
 struct CliArgs {
     #[clap(long)]
     auto_accept_defaults: bool,
@@ -515,7 +515,10 @@ async fn main_menu(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<(
             .default(0)
             .interact()?;
 
-        let packages_dir = PathBuf::from("./ksrc");
+        let mut config_path = config_dir().unwrap();
+        config_path.push("kcli");
+        fs::create_dir_all(&config_path)?;
+        let packages_dir = config_path.join("ksrc");
 
         match selections[selection] {
             "Download Kernel Source" => configure_download_kernel(config, theme).await?,
@@ -778,7 +781,7 @@ async fn build_kernel_menu(
         match selections.get(selection) {
             Some(&"Compile") => {
                 run_make_command(
-                    "LOCALVERSION=\"\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\"",
+                    "LOCALVERSION=\"-capy\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\" -j$(nproc)",
                     &kernel_dir,
                 )
                 .await?;
@@ -800,6 +803,22 @@ async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
     use shell_words::split; // Add shell_words to your Cargo.toml
 
     let config_path = kernel_dir.join(".config");
+    //let version_path = kernel_dir.join("version"); // Path for the version file
+
+    // run make kernelversion > version
+    let status = Command::new("make")
+        .args(split(&command).context("Failed to parse command arguments")?)
+        .current_dir(kernel_dir) // Use the provided kernel directory
+        .status()
+        .await
+        .context("Failed to execute make command")?;
+
+    if status.success() {
+        println!("Command executed successfully.");
+    } else {
+        eprintln!("Command execution failed.");
+        return Err(anyhow::anyhow!("Make command failed"));
+    }
 
     // Check if the .config file exists
     if !config_path.exists() {
@@ -870,7 +889,12 @@ async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTh
 
     // Temporary directory for cloning to avoid name conflict
     let tmp_dir = "ksrc_tmp";
-    let target_dir = Path::new("ksrc").join(dir_name);
+    let mut config_path = config_dir().unwrap();
+    config_path.push("kcli");
+    config_path.push("ksrc");
+    fs::create_dir_all(&config_path)?;
+
+    let target_dir = config_path.join(dir_name);
 
     fs::create_dir_all(&target_dir.parent().unwrap())
         .context("Failed to create 'ksrc' directory")?;
@@ -1168,8 +1192,7 @@ async fn apply_kernel_configuration(
                 .arg("-c")
                 .arg(format!(
                     "scripts/config -d HZ_300 -e HZ_{} --set-val HZ {}",
-                    config.tick_rate,
-                    config.tick_rate
+                    config.tick_rate, config.tick_rate
                 ))
                 .current_dir(kernel_src_dir.clone()) // Correct placement of .current_dir()
                 .output()

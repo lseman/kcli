@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use colored::*;
 use dialoguer::{theme::ColorfulTheme, Input, Select};
+use dirs_next::config_dir;
 use futures::TryStreamExt;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::fs::{self, File};
@@ -11,12 +15,13 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::process::Command as AsyncCommand;
 use walkdir::WalkDir; // Add this import
-use std::io::Write;
 
 pub async fn menu_install_kernel(theme: &ColorfulTheme) -> Result<()> {
-    let main_dir = Path::new("./");
-    let packages_dir = Path::new("./ksrc/");
-    let packages = list_kernel_packages(packages_dir).await?;
+    let mut config_path = config_dir().unwrap();
+    config_path.push("kcli");
+    let packages_dir = config_path.join("ksrc");
+
+    let packages = list_kernel_packages(&packages_dir).await?;
 
     let selection = Select::with_theme(theme)
         .with_prompt("Select a kernel package to install")
@@ -26,7 +31,7 @@ pub async fn menu_install_kernel(theme: &ColorfulTheme) -> Result<()> {
 
     let selected_package = &packages[selection];
     let kernel_src_dir = packages_dir.join(selected_package);
-    let pkg_dir = main_dir.join("pkg");
+    let pkg_dir = config_path.join("pkg");
 
     installing_kernel(&kernel_src_dir, &pkg_dir, selected_package).await?;
     println!("Kernel '{}' installed successfully.", selected_package);
@@ -57,50 +62,168 @@ pub async fn list_kernel_packages(packages_dir: &Path) -> Result<Vec<String>> {
     Ok(packages)
 }
 
-async fn create_pkginfo_file(kernel_name: &str, install_target: &Path) -> Result<()> {
-    let pkginfo_content = format!("pkgname = capycachy\npkgver = {}\npkgdesc = Custom kernel\n", kernel_name);
+async fn calculate_directory_size(dir: &Path) -> Result<u64, anyhow::Error> {
+    let mut total_size = 0u64;
+    let mut dir_entries = fs::read_dir(dir).await?;
+    while let Some(entry) = dir_entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() {
+            total_size += Box::pin(calculate_directory_size(&path)).await?;
+        } else {
+            let metadata = fs::metadata(path).await?;
+            total_size += metadata.len();
+        }
+    }
+    Ok(total_size)
+}
+
+struct PackageInfo {
+    pkgname: &'static str,
+    pkgver: &'static str,
+    pkgrel: &'static str,
+    pkgdesc: &'static str,
+    url: &'static str,
+    license: &'static str,
+    depends: Vec<&'static str>,
+    makedepends: Vec<&'static str>,
+}
+
+static PACKAGE_INFO: Lazy<PackageInfo> = Lazy::new(|| PackageInfo {
+    pkgname: "capykernel",
+    pkgver: "0.0.1",
+    pkgrel: "1",
+    pkgdesc: "Custom kernel package for capykernel",
+    url: "https://cachyos.org",
+    license: "GPL",
+    depends: vec![],
+    makedepends: vec![],
+});
+
+async fn create_pkginfo_file(install_target: &Path) -> Result<()> {
+    // Determine system architecture
+    let output = Command::new("uname").arg("-m").output().await?;
+    let arch = String::from_utf8(output.stdout)?.trim().to_string();
+
+    // Get the current timestamp
+    let builddate = Utc::now().timestamp();
+
+    // Calculate the directory size
+    let output = Command::new("du")
+        .arg("-sb")
+        .arg("--apparent-size")
+        .arg(install_target.to_str().unwrap()) // Ensure the path is correctly converted to string
+        .output()
+        .await?;
+    let size = String::from_utf8(output.stdout)?
+        .split_whitespace()
+        .next()
+        .unwrap_or("0")
+        .to_string();
+
+    // Prepare the content of the .PKGINFO file
+    let pkginfo_content = format!(
+        "pkgname = {}\n\
+        pkgver = {}-{}\n\
+        pkgdesc = {}\n\
+        url = {}\n\
+        license = {}\n\
+        builddate = {}\n\
+        size = {}\n\
+        arch = {}\n\
+        {}",
+        PACKAGE_INFO.pkgname,
+        PACKAGE_INFO.pkgver,
+        PACKAGE_INFO.pkgrel,
+        PACKAGE_INFO.pkgdesc,
+        PACKAGE_INFO.url,
+        PACKAGE_INFO.license,
+        builddate,
+        size,
+        arch,
+        PACKAGE_INFO
+            .depends
+            .iter()
+            .map(|d| format!("depend = {}\n", d))
+            .collect::<String>()
+            + &PACKAGE_INFO
+                .makedepends
+                .iter()
+                .map(|md| format!("makedepend = {}\n", md))
+                .collect::<String>()
+    );
+
+    // Write the content to the .PKGINFO file
     let pkginfo_path = install_target.join(".PKGINFO");
     let mut file = File::create(&pkginfo_path).await?;
     file.write_all(pkginfo_content.as_bytes()).await?;
+    file.flush().await?;
+
     Ok(())
 }
 
 async fn create_buildinfo_file(install_target: &Path) -> Result<()> {
-    let buildinfo_content = "buildenv = (distcc color ccache check !sign)\noptions = (!strip docs libtool staticlibs emptydirs zipman purge !upx !debug)\n";
+    let buildinfo_content = "buildenv = (distcc color ccache check !sign)\n\
+        options = (!strip docs libtool staticlibs emptydirs zipman purge !upx !debug)\n\
+        pkgarch = x86_64\n\
+        packager = Laio Seman <laio@ieee.org>\n";
+
     let buildinfo_path = install_target.join(".BUILDINFO");
     let mut file = File::create(&buildinfo_path).await?;
     file.write_all(buildinfo_content.as_bytes()).await?;
+    file.flush().await?;
     Ok(())
 }
 
-async fn create_mtree_file(pkg_dir: &Path, kernel_name: &str) -> Result<()> {
-    let mtree_path = pkg_dir.join(format!("{}/.MTREE", kernel_name));
-    let output = Command::new("bsdtar")
-        .args(&["-czf", mtree_path.to_str().unwrap(), "-C", pkg_dir.to_str().unwrap(), kernel_name])
-        .output()
-        .await?;
+async fn create_mtree_file(install_target: &Path, kernel_name: &str) -> Result<()> {
+    // Ensure the directory where the .MTREE will be created exists
+    let mtree_path = install_target.join(".MTREE");
+    ensure_directory_exists(mtree_path.parent().unwrap()).await?;
 
+    // Construct the command to create the .MTREE file
+    // Specifying .PKGINFO first ensures it is processed first in the archive
+    let mtree_command = format!(
+        "cd {} && fakeroot -- env LANG=C bsdtar -czf .MTREE --format=mtree \
+        --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' .PKGINFO *",
+        install_target.to_str().unwrap()
+    );
+
+    // Execute the command using a shell to ensure proper handling of wildcards and other shell features
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(mtree_command)
+        .output()
+        .await
+        .context("Failed to create .MTREE file")?;
+
+    // Check for successful execution and handle errors
     if !output.status.success() {
-        Err(anyhow::anyhow!("Failed to create .MTREE file"))
-    } else {
-        Ok(())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("Failed to create .MTREE file: {}", stderr));
     }
+
+    Ok(())
 }
 
-
+async fn ensure_directory_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        tokio::fs::create_dir_all(path)
+            .await
+            .context(format!("Failed to create directory: {}", path.display()))?;
+    }
+    Ok(())
+}
 pub async fn installing_kernel(
     kernel_src_dir: &Path,
     base_pkg_dir: &Path,
     kernel_name: &str,
 ) -> Result<()> {
     // Ensure the target directory for the installation is correct
-    // This makes `install_target` point directly to ./pkg/linux-6.8.3
     let install_target = base_pkg_dir.join(kernel_name);
     fs::create_dir_all(&install_target)
         .await
         .context("Creating kernel install target directory failed")?;
 
-    // Run make modules_install and headers_install with INSTALL_MOD_PATH and INSTALL_HDR_PATH directed to install_target
+    // Running make commands
     run_make_commands(kernel_src_dir, &install_target).await?;
 
     // Create .srctree file
@@ -108,9 +231,8 @@ pub async fn installing_kernel(
     let mut srctree_file = File::create(&srctree_path)
         .await
         .context("Creating .srctree file failed")?;
-
     for entry in WalkDir::new(&install_target) {
-        let entry = entry?;
+        let entry = entry.context("Failed to read directory entry")?;
         if entry.path().is_file() {
             let path = entry
                 .path()
@@ -122,18 +244,29 @@ pub async fn installing_kernel(
         }
     }
 
-    let pkg_dir = Path::new("./pkg/");
-
-    create_pkginfo_file(kernel_name, &install_target).await?;
+    // Metadata and packaging
+    create_pkginfo_file(&install_target).await?;
     create_buildinfo_file(&install_target).await?;
-    create_mtree_file(&pkg_dir, kernel_name).await?;
+    create_mtree_file(&install_target, kernel_name).await?; // Adjusted to use install_target
 
-    // cp cp kernel_src_dir/arch/x86/boot/bzImage install_target/boot/vmlinuz-capycachy-${kernel_name}
+    println!("Kernel dir is {}", kernel_src_dir.display());
+    // Copy kernel image
     let bzimage_path = kernel_src_dir.join("arch/x86/boot/bzImage");
-    let vmlinuz_path = install_target.join("boot").join(format!("vmlinuz-capycachy-{}", kernel_name));
+
+    println!("Copying bzImage to: {}", bzimage_path.display());
+    let vmlinuz_path = install_target
+        .join("boot")
+        .join(format!("vmlinuz-capycachy-{}", kernel_name));
+    // create the boot directory
+    fs::create_dir_all(install_target.join("boot"))
+        .await
+        .context("Creating boot directory failed")?;
+    fs::copy(bzimage_path, vmlinuz_path)
+        .await
+        .context("Copying bzImage failed")?;
 
     // Compress the installed kernel directory including .srctree
-    //compress_kernel_package(&pkg_dir, kernel_name).await?;
+    compress_kernel_package(&install_target, kernel_name).await?; // Assuming this function exists
 
     println!(
         "Kernel package '{}' installed and compressed successfully.",
@@ -180,8 +313,6 @@ pub async fn menu_uninstall_kernel(theme: &ColorfulTheme) -> Result<()> {
 async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> Result<()> {
     let config_path = kernel_src_dir.join(".config");
 
-
-
     // Check if the .config file exists
     if !config_path.exists() {
         println!("`.config` file not found, downloading from repository...");
@@ -215,7 +346,10 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
     println!("Executing `make modules_install`...");
     let status_modules_install = Command::new("make")
         .arg("modules_install")
-        .arg(format!("INSTALL_MOD_PATH=../../{}", install_mod_path.display()))
+        .arg(format!(
+            "INSTALL_MOD_PATH=../../{}",
+            install_mod_path.display()
+        ))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // To see the make command output
         .stderr(Stdio::inherit()) // To see the make command errors
@@ -246,10 +380,14 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
     println!("Installing headers to: {}", install_hdr_path.display());
 
     // Running headers_install with INSTALL_HDR_PATH
+    /*
     println!("Executing `make headers_install` with INSTALL_HDR_PATH...");
     let status_headers_install = Command::new("make")
         .arg("headers_install")
-        .arg(format!("INSTALL_HDR_PATH=../../{}", install_hdr_path.display()))
+        .arg(format!(
+            "INSTALL_HDR_PATH=../../{}",
+            install_hdr_path.display()
+        ))
         .current_dir(kernel_src_dir)
         .stdout(Stdio::inherit()) // Inherit stdout to see command output
         .stderr(Stdio::inherit()) // Inherit stderr to see any errors
@@ -260,40 +398,47 @@ async fn run_make_commands(kernel_src_dir: &Path, install_target: &PathBuf) -> R
     if !status_headers_install.success() {
         return Err(anyhow::anyhow!("`make headers_install` failed"));
     }
+     */
 
     Ok(())
 }
-
 async fn compress_kernel_package(pkg_dir: &Path, kernel_name: &str) -> Result<()> {
-    let tarball_name = format!("{}.capy.tar.gz", kernel_name);
-    let tarball_path = pkg_dir.join(&tarball_name);
-    let tarball_path_str = tarball_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid tarball path"))?;
+    // Construct the tarball path
 
-    let kernel_package_dir = pkg_dir.join(kernel_name);
-    let kernel_package_dir_str = kernel_package_dir
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid kernel package directory"))?;
+    let mut config_path = config_dir().unwrap();
+    config_path.push("kcli");
+    let packages_dir = config_path.join("pkg");
+    let kernel_path = packages_dir.join(kernel_name);
+    let current_dir = std::env::current_dir().unwrap();
 
-    let output = Command::new("tar")
-        .arg("-czf")
-        .arg(tarball_path_str)
-        .arg("-C")
-        .arg(pkg_dir)
-        .arg(kernel_name)
+    // Construct the bsdtar command to respect the order of files
+    let bsdtar_command = format!(
+        "fakeroot -- env LANG=C sh -c 'cd {} && bsdtar -cf - .MTREE .PKGINFO * | gzip -c > {}/{}.capy.tar.gz'",
+        kernel_path.display(),
+        current_dir.display(),
+        kernel_name
+    );
+
+    println!("bsdtar command: {}", bsdtar_command);
+
+    // Execute the command
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(bsdtar_command)
         .output()
         .await
-        .context("Running tar command failed")?;
+        .context("Running bsdtar command failed")?;
 
+    // Check the execution status and handle errors
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("tar command failed with error: {}", stderr));
+        return Err(anyhow::anyhow!(
+            "bsdtar command failed with error: {}",
+            stderr
+        ));
     }
 
-    // Optionally, remove the uncompressed directory after successful compression
-    // fs::remove_dir_all(kernel_package_dir_str).await.context("Removing uncompressed kernel package directory failed")?;
-
+    //println!("Package compressed to: {}", tarball_path.display());
     Ok(())
 }
 
