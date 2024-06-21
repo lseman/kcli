@@ -448,7 +448,7 @@ async fn print_ascii_art() {
   \.............../
    \............./
 
-   capyCachy kernel manager"#
+   capyCachy kernel manager v0.9"#
     );
     println!();
 }
