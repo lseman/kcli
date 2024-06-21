@@ -12,6 +12,7 @@ use std::str;
 use tokio::process::Command;
 use fs_extra::dir::{copy, CopyOptions};
 use tokio::process::Command as TokioCommand;
+use directories::BaseDirs;
 
 mod pkg_manager;
 
@@ -553,7 +554,7 @@ async fn patch_kernel_process(theme: &ColorfulTheme, packages_dir: &Path) -> Res
         return Err(anyhow::anyhow!("No kernel packages found."));
     }
 
-    // add <- Go Back to Main Menu option
+    // Add <- Go Back to Main Menu option
     let mut packages = packages;
     packages.push("<- Back to Main Menu".to_string());
 
@@ -564,7 +565,7 @@ async fn patch_kernel_process(theme: &ColorfulTheme, packages_dir: &Path) -> Res
         .default(0)
         .interact()?;
 
-    // if <- Back to Main Menu is selected, return to main menu
+    // If <- Back to Main Menu is selected, return to main menu
     if selected_package_index == packages.len() - 1 {
         return Ok(());
     }
@@ -573,9 +574,10 @@ async fn patch_kernel_process(theme: &ColorfulTheme, packages_dir: &Path) -> Res
     let selected_package = &packages[selected_package_index];
     println!("Selected package for configuration: {}", selected_package);
 
-    // now we should enter the kernel directory
+    // Enter the kernel directory
     let kernel_dir = Path::new(packages_dir).join(selected_package);
 
+    // Clone or use existing patches directory
     let patches_dir = clone_patches_repo().await?;
     let selected_patch = navigate_and_select_patch(patches_dir).await?;
 
@@ -585,22 +587,53 @@ async fn patch_kernel_process(theme: &ColorfulTheme, packages_dir: &Path) -> Res
 
     Ok(())
 }
-
 async fn clone_patches_repo() -> Result<PathBuf, anyhow::Error> {
     let repo_url = "https://github.com/CachyOS/kernel-patches";
-    let target_dir = PathBuf::from("kernel-patches"); // Directory where the repo will be cloned
 
-    // Check if the directory already exists
-    if !target_dir.exists() {
-        tokio::process::Command::new("git")
-            .args(["clone", repo_url, target_dir.to_str().unwrap()])
-            .output()
-            .await
-            .context("Failed to clone kernel patches repository")?;
+    // Get the configuration directory
+    let base_dirs = BaseDirs::new().context("Failed to get base directories")?;
+    let mut config_path = base_dirs.config_dir().to_path_buf();
+    config_path.push("kcli");
+    config_path.push("kernel-patches");
+
+    // Check if the target directory already exists
+    if config_path.exists() {
+        println!("Kernel patches directory already exists at '{}'.", config_path.to_string_lossy());
+        return Ok(config_path);
     }
 
-    Ok(target_dir)
+    // Temporary directory for cloning to avoid name conflict
+    let tmp_dir = "/tmp/kernel_patches_tmp";
+
+    // Clone the repository into the temporary directory
+    if Path::new(tmp_dir).exists() {
+        fs::remove_dir_all(tmp_dir).context("Failed to remove existing temporary directory")?;
+    }
+
+    Command::new("git")
+        .args(["clone", repo_url, tmp_dir])
+        .output()
+        .await
+        .context("Failed to clone kernel patches repository")?;
+
+    // Copy the directory instead of renaming
+    let tmp_path = Path::new(tmp_dir);
+    if tmp_path.exists() {
+        let mut options = CopyOptions::new();
+        options.copy_inside = true;
+        copy(tmp_path, &config_path, &options)
+            .context("Failed to copy kernel patches to config directory")?;
+        // Clean up temporary directory
+        fs::remove_dir_all(tmp_path).context("Failed to remove temporary directory")?;
+    } else {
+        return Err(anyhow::anyhow!(
+            "Temporary directory not found after cloning."
+        ));
+    }
+
+    Ok(config_path)
 }
+
 
 async fn navigate_and_select_patch(patch_dir: PathBuf) -> Result<Option<PathBuf>> {
     let mut current_dir = patch_dir;
@@ -680,7 +713,7 @@ async fn apply_patch(patch_file: PathBuf, kernel_dir: &Path) -> Result<(), anyho
     let output = Command::new("sh")
         .current_dir(kernel_dir) // Sets the working directory to kernel_dir
         .arg("-c")
-        .arg(format!("patch -Np1 --merge < ../../{}", patch_file_str))
+        .arg(format!("patch -Np1 --merge < {}", patch_file_str))
         .output()
         .await
         .context("Failed to apply patch")?;
