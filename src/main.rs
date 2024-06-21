@@ -816,7 +816,7 @@ async fn build_kernel_menu(
         match selections.get(selection) {
             Some(&"Compile") => {
                 run_make_command(
-                    "LOCALVERSION=\"-capy\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\" -j$(nproc)",
+                    "LOCALVERSION=\"-capy\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\"",
                     &kernel_dir,
                 )
                 .await?;
@@ -837,23 +837,16 @@ async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
     let command = format!("make {}", args);
     use shell_words::split; // Add shell_words to your Cargo.toml
 
+    // print kernel_dir
+    
     let config_path = kernel_dir.join(".config");
+    // print config path
+
+    println!("Running make command: {}", command);
+    // print config_path
+    println!("config path: {}", config_path.display());
+
     //let version_path = kernel_dir.join("version"); // Path for the version file
-
-    // run make kernelversion > version
-    let status = Command::new("make")
-        .args(split(&command).context("Failed to parse command arguments")?)
-        .current_dir(kernel_dir) // Use the provided kernel directory
-        .status()
-        .await
-        .context("Failed to execute make command")?;
-
-    if status.success() {
-        println!("Command executed successfully.");
-    } else {
-        eprintln!("Command execution failed.");
-        return Err(anyhow::anyhow!("Make command failed"));
-    }
 
     // Check if the .config file exists
     if !config_path.exists() {
@@ -880,6 +873,22 @@ async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
     } else {
         println!("Using existing `.config` file at {}", config_path.display());
     }
+
+    // run make kernelversion > version
+    let status = Command::new("make")
+        .args(split(&command).context("Failed to parse command arguments")?)
+        .current_dir(kernel_dir) // Use the provided kernel directory
+        .status()
+        .await
+        .context("Failed to execute make command")?;
+
+    if status.success() {
+        println!("Command executed successfully.");
+    } else {
+        eprintln!("Command execution failed.");
+        return Err(anyhow::anyhow!("Make command failed"));
+    }
+
 
     let args_vec = split(&command).context("Failed to parse command arguments")?;
 
