@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Input, Select};
+use directories::BaseDirs;
 use dirs_next::config_dir;
+use fs_extra::dir::{copy, CopyOptions};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::File;
@@ -10,9 +12,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str;
 use tokio::process::Command;
-use fs_extra::dir::{copy, CopyOptions};
 use tokio::process::Command as TokioCommand;
-use directories::BaseDirs;
+use num_cpus;
 
 mod pkg_manager;
 
@@ -598,7 +599,10 @@ async fn clone_patches_repo() -> Result<PathBuf, anyhow::Error> {
 
     // Check if the target directory already exists
     if config_path.exists() {
-        println!("Kernel patches directory already exists at '{}'.", config_path.to_string_lossy());
+        println!(
+            "Kernel patches directory already exists at '{}'.",
+            config_path.to_string_lossy()
+        );
         return Ok(config_path);
     }
 
@@ -633,7 +637,6 @@ async fn clone_patches_repo() -> Result<PathBuf, anyhow::Error> {
 
     Ok(config_path)
 }
-
 
 async fn navigate_and_select_patch(patch_dir: PathBuf) -> Result<Option<PathBuf>> {
     let mut current_dir = patch_dir;
@@ -815,11 +818,12 @@ async fn build_kernel_menu(
 
         match selections.get(selection) {
             Some(&"Compile") => {
-                run_make_command(
-                    "LOCALVERSION=\"-capy\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\"",
-                    &kernel_dir,
-                )
-                .await?;
+                let nprocs = num_cpus::get();
+                let make_command = format!(
+                    "LOCALVERSION=\"-capy\" KCFLAGS=\"-mpopcnt -fivopts -fmodulo-sched\" -j{}",
+                    nprocs
+                );
+                run_make_command(&make_command, &kernel_dir).await?;
             }
             Some(&"Install Modules") => {
                 run_make_command("modules_install", &kernel_dir).await?;
@@ -834,20 +838,10 @@ async fn build_kernel_menu(
 }
 
 async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
-    let command = format!("make {}", args);
+    let command = format!("{}", args);
     use shell_words::split; // Add shell_words to your Cargo.toml
 
-    // print kernel_dir
-    
     let config_path = kernel_dir.join(".config");
-    // print config path
-
-    println!("Running make command: {}", command);
-    // print config_path
-    println!("config path: {}", config_path.display());
-
-    //let version_path = kernel_dir.join("version"); // Path for the version file
-
     // Check if the .config file exists
     if !config_path.exists() {
         println!("`.config` file not found, downloading from repository...");
@@ -888,7 +882,6 @@ async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
         eprintln!("Command execution failed.");
         return Err(anyhow::anyhow!("Make command failed"));
     }
-
 
     let args_vec = split(&command).context("Failed to parse command arguments")?;
 
@@ -966,8 +959,7 @@ async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTh
             target_dir.to_string_lossy()
         );
         // Clean up temporary directory
-        fs::remove_dir_all(tmp_path)
-            .context("Failed to remove temporary directory")?;
+        fs::remove_dir_all(tmp_path).context("Failed to remove temporary directory")?;
     } else {
         return Err(anyhow::anyhow!(
             "Temporary directory not found after cloning."

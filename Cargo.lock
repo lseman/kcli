@@ -1172,6 +1172,7 @@ dependencies = [
  "is-terminal",
  "log",
  "nix",
+ "num_cpus",
  "once_cell",
  "regex",
  "reqwest",
