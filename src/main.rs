@@ -10,6 +10,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str;
 use tokio::process::Command;
+use fs_extra::dir::{copy, CopyOptions};
+use tokio::process::Command as TokioCommand;
 
 mod pkg_manager;
 
@@ -868,7 +870,6 @@ async fn run_make_command(args: &str, kernel_dir: &Path) -> Result<()> {
 
     Ok(())
 }
-
 async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTheme) -> Result<()> {
     let selections = vec!["Stable Kernel", "RC Kernel", "<-"];
     let selection = Select::with_theme(theme)
@@ -888,7 +889,7 @@ async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTh
     };
 
     // Temporary directory for cloning to avoid name conflict
-    let tmp_dir = "ksrc_tmp";
+    let tmp_dir = "/tmp/ksrc_tmp";
     let mut config_path = config_dir().unwrap();
     config_path.push("kcli");
     config_path.push("ksrc");
@@ -900,7 +901,7 @@ async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTh
         .context("Failed to create 'ksrc' directory")?;
 
     // Execute 'git clone' within the temporary directory
-    let output = Command::new("git")
+    let output = TokioCommand::new("git")
         .args(["clone", "--depth", "1", url, tmp_dir])
         .output()
         .await
@@ -911,15 +912,20 @@ async fn configure_download_kernel(config: &mut KernelConfig, theme: &ColorfulTh
         return Err(anyhow::anyhow!("Git clone failed: {}", error_message));
     }
 
-    // Rename and move the directory
+    // Copy the directory instead of renaming
     let tmp_path = Path::new(tmp_dir);
     if tmp_path.exists() {
-        fs::rename(tmp_path, &target_dir)
-            .context(format!("Failed to rename directory to '{}'", dir_name))?;
+        let mut options = CopyOptions::new();
+        options.copy_inside = true;
+        copy(tmp_path, &target_dir, &options)
+            .context(format!("Failed to copy directory to '{}'", dir_name))?;
         println!(
             "Kernel source downloaded and moved to '{}'.",
             target_dir.to_string_lossy()
         );
+        // Clean up temporary directory
+        fs::remove_dir_all(tmp_path)
+            .context("Failed to remove temporary directory")?;
     } else {
         return Err(anyhow::anyhow!(
             "Temporary directory not found after cloning."
